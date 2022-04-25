@@ -8,10 +8,11 @@ import numpy as np
 
 class ActNorm(nn.Module):
 
-    def __init__(self, dims_in, init_data=None):
+    def __init__(self, dims_in, init_data=None, clamp_value=3.):
         super().__init__()
         self.dims_in = dims_in[0]
         param_dims = [1, self.dims_in[0]] + [1 for i in range(len(self.dims_in) - 1)]
+        self.clamp_value = clamp_value
         self.scale = nn.Parameter(torch.zeros(*param_dims))
         self.bias = nn.Parameter(torch.zeros(*param_dims))
 
@@ -27,30 +28,33 @@ class ActNorm(nn.Module):
             self.init_on_next_batch = False
         self._register_load_state_dict_pre_hook(on_load_state_dict)
 
-    def initialize_with_data(self, data):
+    def scale_clamped(self):
+        return self.scale.clamp(-self.clamp_value, self.clamp_value)
+
+    def initialize_with_data(self, data, rev=False):
         # Initialize to mean 0 and std 1 with sample batch
         # 'data' expected to be of shape (batch, channels[, ...])
         assert all([data.shape[i+1] == self.dims_in[i] for i in range(len(self.dims_in))]),\
             "Can't initialize ActNorm layer, provided data don't match input dimensions."
         self.scale.data.view(-1)[:] \
-            = torch.log(1 / data.transpose(0,1).contiguous().view(self.dims_in[0], -1).std(dim=-1))
-        data = data * self.scale.exp()
+            = ((-1)**rev)*torch.log(1 / data.transpose(0,1).contiguous().view(self.dims_in[0], -1).std(dim=-1))
+        data = data * self.scale_clamped().exp()
         self.bias.data.view(-1)[:] \
-            = -data.transpose(0,1).contiguous().view(self.dims_in[0], -1).mean(dim=-1)
+            = ((-1)**rev)*-data.transpose(0,1).contiguous().view(self.dims_in[0], -1).mean(dim=-1)
         self.init_on_next_batch = False
 
     def forward(self, x, rev=False):
         if self.init_on_next_batch:
-            self.initialize_with_data(x[0])
+            self.initialize_with_data(x[0], rev)
 
         if not rev:
-            return [x[0] * self.scale.exp() + self.bias]
+            return [x[0] * self.scale_clamped().exp() + self.bias]
         else:
-            return [(x[0] - self.bias) / self.scale.exp()]
+            return [(x[0] - self.bias) / self.scale_clamped().exp()]
 
     def jacobian(self, x, rev=False):
         if not rev:
-            return (self.scale.sum() * np.prod(self.dims_in[1:])).repeat(x[0].shape[0])
+            return (self.scale_clamped().sum() * np.prod(self.dims_in[1:])).repeat(x[0].shape[0])
         else:
             return -self.jacobian(x)
 
